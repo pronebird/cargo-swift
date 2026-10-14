@@ -7,7 +7,6 @@ use crate::lib_type::LibType;
 use crate::targets::ApplePlatform;
 use crate::Result;
 use camino::{Utf8Path, Utf8PathBuf};
-use itertools::Itertools;
 use uniffi_bindgen::bindings::{GenerateOptions, TargetLanguage};
 
 use crate::recreate_dir;
@@ -54,9 +53,10 @@ pub fn platform_headers_dir(generated_dir: &Path, platform: ApplePlatform) -> Pa
 /// Bindings are generated separately from each platform's library, since the exported
 /// API may differ between platforms (e.g. items gated behind `#[cfg(target_os = "ios")]`).
 /// Headers are kept per platform in `generated/<platform>/headers` and end up in the
-/// matching XCFramework slice. Swift sources are merged into `generated/sources`: a file
-/// that is identical on all platforms is written as-is, otherwise each distinct variant is
-/// wrapped in an `#if` block for the platforms it was generated for.
+/// matching XCFramework slice. Swift sources are written to `generated/sources`: a file
+/// that is identical on all platforms is written as-is, otherwise each platform gets its
+/// own `<name>.<platform>.swift` file wrapped in an `#if` block for that platform, since
+/// a Swift package target cannot select source files per platform.
 pub fn generate_bindings(
     platform_libs: &[(ApplePlatform, Utf8PathBuf)],
     lib_type: LibType,
@@ -68,8 +68,8 @@ pub fn generate_bindings(
     create_dir(&sources)?;
 
     let mut ffi_module_name: Option<String> = None;
-    // File name -> list of (content, platforms that generated this content)
-    let mut swift_files = BTreeMap::<String, Vec<(String, Vec<ApplePlatform>)>>::new();
+    // File name -> list of (platform, content generated for that platform)
+    let mut swift_files = BTreeMap::<String, Vec<(ApplePlatform, String)>>::new();
 
     for (platform, lib_path) in platform_libs {
         let platform_dir = out_dir.join(platform.identifier());
@@ -91,32 +91,28 @@ pub fn generate_bindings(
             let file_name = path.file_name().unwrap().to_string_lossy().to_string();
             let content = fs::read_to_string(&path)?;
 
-            let variants = swift_files.entry(file_name).or_default();
-            match variants.iter_mut().find(|(c, _)| *c == content) {
-                Some((_, platforms)) => platforms.push(*platform),
-                None => variants.push((content, vec![*platform])),
-            }
+            swift_files
+                .entry(file_name)
+                .or_default()
+                .push((*platform, content));
         }
     }
 
     for (file_name, variants) in swift_files {
-        let source = match variants.as_slice() {
-            [(content, platforms)] if platforms.len() == platform_libs.len() => content.clone(),
-            _ => {
-                let mut source = String::new();
-                for (i, (content, platforms)) in variants.iter().enumerate() {
-                    let condition = platforms
-                        .iter()
-                        .map(|p| format!("({})", p.swift_condition()))
-                        .join(" || ");
-                    let directive = if i == 0 { "#if" } else { "#elseif" };
-                    source.push_str(&format!("{directive} {condition}\n{content}\n"));
-                }
-                source.push_str("#endif\n");
-                source
-            }
-        };
-        fs::write(sources.join(file_name), source)?;
+        let (_, first) = &variants[0];
+        if variants.len() == platform_libs.len() && variants.iter().all(|(_, c)| c == first) {
+            fs::write(sources.join(&file_name), first)?;
+            continue;
+        }
+
+        let stem = file_name.strip_suffix(".swift").unwrap_or(&file_name);
+        for (platform, content) in &variants {
+            let source = format!("#if {}\n{content}\n#endif\n", platform.swift_condition());
+            fs::write(
+                sources.join(format!("{stem}.{}.swift", platform.identifier())),
+                source,
+            )?;
+        }
     }
 
     ffi_module_name.ok_or_else(|| anyhow!("No platforms to generate bindings for").into())
