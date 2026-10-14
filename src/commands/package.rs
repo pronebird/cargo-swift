@@ -749,15 +749,20 @@ fn generate_bindings_with_output(
 ) -> Result<String> {
     run_step(config, "Generating Swift bindings...", || {
         let lib_file = library_file_name(lib_name, lib_type);
-        let target = metadata().target_dir();
-        let archs = targets
-            .first()
-            .ok_or("Could not generate UniFFI bindings: No target platform selected!")?
-            .architectures();
-        let arch = archs.first();
-        let lib_path: Utf8PathBuf = format!("{target}/{arch}/{mode}/{lib_file}").into();
+        let target_dir = metadata().target_dir();
+        if targets.is_empty() {
+            return Err("Could not generate UniFFI bindings: No target platform selected!".into());
+        }
+        let platform_libs: Vec<_> = targets
+            .iter()
+            .map(|target| {
+                let arch = target.architectures().head;
+                let lib_path: Utf8PathBuf = format!("{target_dir}/{arch}/{mode}/{lib_file}").into();
+                (target.platform(), lib_path)
+            })
+            .collect();
 
-        generate_bindings(&lib_path, lib_type)
+        generate_bindings(&platform_libs, lib_type)
             .map_err(|e| format!("Could not generate UniFFI bindings for udl files due to the following error: \n {e}").into())
     })
 }

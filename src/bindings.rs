@@ -1,9 +1,13 @@
+use std::collections::BTreeMap;
 use std::fs::{self, create_dir};
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use crate::lib_type::LibType;
+use crate::targets::ApplePlatform;
 use crate::Result;
 use camino::{Utf8Path, Utf8PathBuf};
+use itertools::Itertools;
 use uniffi_bindgen::bindings::{GenerateOptions, TargetLanguage};
 
 use crate::recreate_dir;
@@ -40,7 +44,86 @@ impl FfiModule {
     }
 }
 
-/// Generates UniFFI bindings for crate and returns the FFI module name.
+/// Directory containing the generated headers for the given platform.
+pub fn platform_headers_dir(generated_dir: &Path, platform: ApplePlatform) -> PathBuf {
+    generated_dir.join(platform.identifier()).join("headers")
+}
+
+/// Generates UniFFI bindings for every platform and returns the FFI module name.
+///
+/// Bindings are generated separately from each platform's library, since the exported
+/// API may differ between platforms (e.g. items gated behind `#[cfg(target_os = "ios")]`).
+/// Headers are kept per platform in `generated/<platform>/headers` and end up in the
+/// matching XCFramework slice. Swift sources are merged into `generated/sources`: a file
+/// that is identical on all platforms is written as-is, otherwise each distinct variant is
+/// wrapped in an `#if` block for the platforms it was generated for.
+pub fn generate_bindings(
+    platform_libs: &[(ApplePlatform, Utf8PathBuf)],
+    lib_type: LibType,
+) -> Result<String> {
+    let out_dir = Utf8Path::new("./generated");
+    let sources = out_dir.join("sources");
+
+    recreate_dir(out_dir)?;
+    create_dir(&sources)?;
+
+    let mut ffi_module_name: Option<String> = None;
+    // File name -> list of (content, platforms that generated this content)
+    let mut swift_files = BTreeMap::<String, Vec<(String, Vec<ApplePlatform>)>>::new();
+
+    for (platform, lib_path) in platform_libs {
+        let platform_dir = out_dir.join(platform.identifier());
+        let platform_module_name = generate_platform_bindings(lib_path, lib_type, &platform_dir)?;
+
+        match &ffi_module_name {
+            None => ffi_module_name = Some(platform_module_name),
+            Some(name) if *name != platform_module_name => {
+                return Err(anyhow!(
+                    "FFI module name differs between platforms: {name} and {platform_module_name}"
+                )
+                .into())
+            }
+            Some(_) => {}
+        }
+
+        for f in fs::read_dir(platform_dir.join("sources"))? {
+            let path = f?.path();
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let content = fs::read_to_string(&path)?;
+
+            let variants = swift_files.entry(file_name).or_default();
+            match variants.iter_mut().find(|(c, _)| *c == content) {
+                Some((_, platforms)) => platforms.push(*platform),
+                None => variants.push((content, vec![*platform])),
+            }
+        }
+    }
+
+    for (file_name, variants) in swift_files {
+        let source = match variants.as_slice() {
+            [(content, platforms)] if platforms.len() == platform_libs.len() => content.clone(),
+            _ => {
+                let mut source = String::new();
+                for (i, (content, platforms)) in variants.iter().enumerate() {
+                    let condition = platforms
+                        .iter()
+                        .map(|p| format!("({})", p.swift_condition()))
+                        .join(" || ");
+                    let directive = if i == 0 { "#if" } else { "#elseif" };
+                    source.push_str(&format!("{directive} {condition}\n{content}\n"));
+                }
+                source.push_str("#endif\n");
+                source
+            }
+        };
+        fs::write(sources.join(file_name), source)?;
+    }
+
+    ffi_module_name.ok_or_else(|| anyhow!("No platforms to generate bindings for").into())
+}
+
+/// Generates UniFFI bindings for a single platform library into `out_dir` and returns
+/// the FFI module name.
 ///
 /// This function respects the `ffi_module_name` and `ffi_module_filename` settings
 /// in uniffi.toml. The returned FFI module name is detected from the generated
@@ -51,12 +134,15 @@ impl FfiModule {
 /// clang can resolve every module by name. A dynamic library is wrapped in a single
 /// framework that can only expose one module, so all headers are merged into the primary
 /// FFI module and the generated Swift sources are rewritten to import it instead.
-pub fn generate_bindings(lib_path: &Utf8Path, lib_type: LibType) -> Result<String> {
-    let out_dir = Utf8Path::new("./generated");
+fn generate_platform_bindings(
+    lib_path: &Utf8Path,
+    lib_type: LibType,
+    out_dir: &Utf8Path,
+) -> Result<String> {
     let headers = out_dir.join("headers");
     let sources = out_dir.join("sources");
 
-    recreate_dir(out_dir)?;
+    create_dir(out_dir)?;
     create_dir(&headers)?;
     create_dir(&sources)?;
 
