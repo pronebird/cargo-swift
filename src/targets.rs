@@ -338,6 +338,20 @@ impl ApplePlatform {
         }
     }
 
+    /// Operating system shared by device and simulator platforms, as an identifier and
+    /// the Swift compilation condition that is true only when building for it.
+    pub fn os_family(&self) -> (&'static str, &'static str) {
+        use ApplePlatform::*;
+        match self {
+            IOS | IOSSimulator => ("ios", "os(iOS) && !targetEnvironment(macCatalyst)"),
+            MacOS => ("macos", "os(macOS)"),
+            MacCatalyst => ("maccatalyst", "os(iOS) && targetEnvironment(macCatalyst)"),
+            TvOS | TvOSSimulator => ("tvos", "os(tvOS)"),
+            WatchOS | WatchOSSimulator => ("watchos", "os(watchOS)"),
+            VisionOS | VisionOSSimulator => ("visionos", "os(visionOS)"),
+        }
+    }
+
     /// macOS and Mac Catalyst use the historical "versioned" framework bundle layout
     /// (`Versions/A/...` with symlinks at the top level). All other Apple platforms
     /// use the flat ("shallow") layout where Info.plist sits at the bundle root.

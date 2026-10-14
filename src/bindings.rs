@@ -53,10 +53,14 @@ pub fn platform_headers_dir(generated_dir: &Path, platform: ApplePlatform) -> Pa
 /// Bindings are generated separately from each platform's library, since the exported
 /// API may differ between platforms (e.g. items gated behind `#[cfg(target_os = "ios")]`).
 /// Headers are kept per platform in `generated/<platform>/headers` and end up in the
-/// matching XCFramework slice. Swift sources are written to `generated/sources`: a file
-/// that is identical on all platforms is written as-is, otherwise each platform gets its
-/// own `<name>.<platform>.swift` file wrapped in an `#if` block for that platform, since
-/// a Swift package target cannot select source files per platform.
+/// matching XCFramework slice.
+///
+/// Swift sources are written to `generated/sources`. A Swift package target cannot select
+/// source files per platform, so a file that differs between platforms is split into files
+/// wrapped in `#if` blocks:
+/// - `<name>.swift` when identical for all platforms,
+/// - `<name>.<os>.swift` when identical for all platforms of an OS (e.g. device and simulator),
+/// - `<name>.<platform>.swift` otherwise.
 pub fn generate_bindings(
     platform_libs: &[(ApplePlatform, Utf8PathBuf)],
     lib_type: LibType,
@@ -106,12 +110,46 @@ pub fn generate_bindings(
         }
 
         let stem = file_name.strip_suffix(".swift").unwrap_or(&file_name);
-        for (platform, content) in &variants {
-            let source = format!("#if {}\n{content}\n#endif\n", platform.swift_condition());
+        let write_variant = |suffix: &str, condition: &str, content: &str| {
             fs::write(
-                sources.join(format!("{stem}.{}.swift", platform.identifier())),
-                source,
-            )?;
+                sources.join(format!("{stem}.{suffix}.swift")),
+                format!("#if {condition}\n{content}\n#endif\n"),
+            )
+        };
+
+        // Platforms of the same OS (e.g. device and simulator) usually generate identical
+        // code, in which case they share a single file.
+        let mut os_families = Vec::new();
+        for (platform, _) in platform_libs {
+            if !os_families.contains(&platform.os_family()) {
+                os_families.push(platform.os_family());
+            }
+        }
+
+        for (os, os_condition) in os_families {
+            let os_platforms = platform_libs
+                .iter()
+                .filter(|(platform, _)| platform.os_family().0 == os)
+                .count();
+            let os_variants: Vec<_> = variants
+                .iter()
+                .filter(|(platform, _)| platform.os_family().0 == os)
+                .collect();
+
+            match os_variants.as_slice() {
+                [] => {}
+                [(_, first), ..]
+                    if os_variants.len() == os_platforms
+                        && os_variants.iter().all(|(_, c)| c == first) =>
+                {
+                    write_variant(os, os_condition, first)?;
+                }
+                _ => {
+                    for (platform, content) in os_variants {
+                        write_variant(platform.identifier(), platform.swift_condition(), content)?;
+                    }
+                }
+            }
         }
     }
 
