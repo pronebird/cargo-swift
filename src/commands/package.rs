@@ -319,7 +319,6 @@ fn run_for_crate(
         &crate_name,
         &package_name,
         &xcframework_name,
-        &ffi_module_name,
         mode,
         lib_type,
         config,
@@ -758,7 +757,7 @@ fn generate_bindings_with_output(
         let arch = archs.first();
         let lib_path: Utf8PathBuf = format!("{target}/{arch}/{mode}/{lib_file}").into();
 
-        generate_bindings(&lib_path)
+        generate_bindings(&lib_path, lib_type)
             .map_err(|e| format!("Could not generate UniFFI bindings for udl files due to the following error: \n {e}").into())
     })
 }
@@ -792,7 +791,6 @@ fn create_xcframework_with_output(
     lib_name: &str,
     package_name: &str,
     xcframework_name: &str,
-    ffi_module_name: &str,
     mode: Mode,
     lib_type: LibType,
     config: &Config,
@@ -809,7 +807,6 @@ fn create_xcframework_with_output(
             targets,
             lib_name,
             xcframework_name,
-            ffi_module_name,
             &generated_dir,
             &output_dir,
             mode,

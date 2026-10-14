@@ -39,11 +39,12 @@ pub fn search_subframework_paths(output_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(subframework_paths)
 }
 
-pub fn patch_subframework(
-    sf_dir: &Path,
-    generated_dir: &Path,
-    ffi_module_name: &str,
-) -> Result<()> {
+/// Places the headers of each FFI module into `Headers/{ffi_module_name}/`.
+///
+/// Each module directory contains its header and a modulemap declaring only that module,
+/// which lets clang resolve every module by name while avoiding a top-level
+/// `module.modulemap` that would collide with other XCFrameworks in the same app.
+pub fn patch_subframework(sf_dir: &Path, generated_dir: &Path) -> Result<()> {
     // xcodebuild creates lowercase "headers", but we rename to uppercase "Headers" (Apple convention)
     let mut headers = sf_dir.to_owned();
     headers.push("headers");
@@ -52,44 +53,42 @@ pub fn patch_subframework(
     let mut generated_headers = generated_dir.to_owned();
     generated_headers.push("headers");
 
-    let mut patched_headers = sf_dir.to_owned();
-    patched_headers.push("Headers");
-    patched_headers.push(ffi_module_name);
-    std::fs::create_dir_all(&patched_headers)
-        .with_context(|| format!("Failed to create empty patched directory {patched_headers:?}"))?;
+    let patched_headers = sf_dir.join("Headers");
 
-    let mut gen_header_files = Vec::<PathBuf>::new();
-    for file in std::fs::read_dir(&generated_headers).with_context(|| {
-        format!("Failed to read from the generated header directory {patched_headers:?}")
+    for module_dir in std::fs::read_dir(&generated_headers).with_context(|| {
+        format!("Failed to read from the generated header directory {generated_headers:?}")
     })? {
-        let file = file?;
-        gen_header_files.push(file.path());
-    }
-
-    for path in gen_header_files {
-        let filename = path
-            .components()
-            .next_back()
-            .ok_or(anyhow!("Expected source filename when copying"))?;
-        patched_headers.push(filename);
-        std::fs::copy(&path, &patched_headers).with_context(|| {
-            format!("Failed to copy header file from {path:?} to {patched_headers:?}")
+        let module_dir = module_dir?.path();
+        let module_name = module_dir
+            .file_name()
+            .ok_or(anyhow!("Expected module directory name when copying"))?;
+        let patched_module_dir = patched_headers.join(module_name);
+        std::fs::create_dir_all(&patched_module_dir).with_context(|| {
+            format!("Failed to create empty patched directory {patched_module_dir:?}")
         })?;
-        let _copied_file = patched_headers.pop();
+
+        for file in std::fs::read_dir(&module_dir).with_context(|| {
+            format!("Failed to read from the generated module directory {module_dir:?}")
+        })? {
+            let path = file?.path();
+            let filename = path
+                .file_name()
+                .ok_or(anyhow!("Expected source filename when copying"))?;
+            let destination = patched_module_dir.join(filename);
+            std::fs::copy(&path, &destination).with_context(|| {
+                format!("Failed to copy header file from {path:?} to {destination:?}")
+            })?;
+        }
     }
 
     Ok(())
 }
 
-pub fn patch_xcframework(
-    output_dir: &Path,
-    generated_dir: &Path,
-    ffi_module_name: &str,
-) -> Result<()> {
+pub fn patch_xcframework(output_dir: &Path, generated_dir: &Path) -> Result<()> {
     let subframeworks =
         search_subframework_paths(output_dir).context("Failed to get subframework components")?;
     for subframework in subframeworks {
-        patch_subframework(&subframework, generated_dir, ffi_module_name)
+        patch_subframework(&subframework, generated_dir)
             .with_context(|| format!("Failed to patch {subframework:?}"))?;
     }
 
@@ -309,7 +308,6 @@ pub fn create_xcframework(
     targets: &[Target],
     lib_name: &str,
     xcframework_name: &str,
-    ffi_module_name: &str,
     generated_dir: &Path,
     output_dir: &Path,
     mode: Mode,
@@ -389,7 +387,7 @@ pub fn create_xcframework(
         // Only patch headers for static libraries — for dynamic, headers are already
         // inside each .framework bundle and xcodebuild preserves them as-is.
         if matches!(lib_type, LibType::Static) {
-            patch_xcframework(output_dir, generated_dir, ffi_module_name)
+            patch_xcframework(output_dir, generated_dir)
                 .context("Failed to patch the XCFramework")?;
         }
         Ok(())
